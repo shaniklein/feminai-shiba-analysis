@@ -2,7 +2,8 @@
 Cole-Cole Feature Extraction from Impedance Spectroscopy Data
 
 This script processes CSV files containing impedance measurements and computes
-Cole-Cole parameters (R0, R∞, τ, α) for each electrode configuration.
+Cole-Cole parameters (R0, R∞, τ, α) for each electrode configuration, separately
+for each side (left/right).
 """
 
 import numpy as np
@@ -147,20 +148,25 @@ def fit_cole_cole(freq: np.ndarray, Z_complex: np.ndarray) -> Tuple[float, float
 
 def compute_cole_cole_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute Cole-Cole features for each electrode configuration.
+    Compute Cole-Cole features for each electrode configuration, separately for each side.
     
     Args:
-        df: DataFrame with columns: v1, v2, i1, i2, freq, z, phase
+        df: DataFrame with columns: v1, v2, i1, i2, freq, z, phase, side
     
     Returns:
-        DataFrame with Cole-Cole parameters for each electrode configuration
+        DataFrame with Cole-Cole parameters for each electrode configuration and side
     """
     results = []
     
-    # Group by electrode configuration
-    electrode_groups = df.groupby(['v1', 'v2', 'i1', 'i2'])
+    # Check if 'side' column exists, if not, create a dummy 'side' column
+    if 'side' not in df.columns:
+        df = df.copy()
+        df['side'] = 'unknown'
     
-    for (v1, v2, i1, i2), group in electrode_groups:
+    # Group by side and electrode configuration
+    electrode_groups = df.groupby(['side', 'v1', 'v2', 'i1', 'i2'])
+    
+    for (side, v1, v2, i1, i2), group in electrode_groups:
         # Filter out disconnected measurements
         group = group[group['is_disconnected'] == 0].copy()
         
@@ -187,6 +193,7 @@ def compute_cole_cole_features(df: pd.DataFrame) -> pd.DataFrame:
             fc = 1.0 / (2 * np.pi * tau) if tau > 0 else None  # Characteristic frequency
             
             results.append({
+                'side': side,
                 'v1': v1,
                 'v2': v2,
                 'i1': i1,
@@ -208,13 +215,14 @@ def compute_cole_cole_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def process_csv_file(filepath: str) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
     """
-    Process a single CSV file and compute Cole-Cole features.
+    Process a single CSV file and compute Cole-Cole features separately for each side.
     
     Args:
         filepath: Path to CSV file
     
     Returns:
         Tuple of (original_data, cole_cole_features)
+        Features are computed separately for each side and electrode configuration.
     """
     try:
         # Read CSV
@@ -228,14 +236,12 @@ def process_csv_file(filepath: str) -> Tuple[pd.DataFrame, Optional[pd.DataFrame
             print(f"Warning: Missing columns in {filepath}: {missing_cols}")
             return df, None
         
-        # Compute Cole-Cole features
+        # Compute Cole-Cole features (side is now included in the grouping)
         features_df = compute_cole_cole_features(df)
         
         # Add metadata from original file
-        if 'patient_id' in df.columns and len(df) > 0:
+        if 'patient_id' in df.columns and len(df) > 0 and len(features_df) > 0:
             features_df['patient_id'] = df['patient_id'].iloc[0]
-        if 'side' in df.columns and len(df) > 0:
-            features_df['side'] = df['side'].iloc[0]
         
         return df, features_df
     
@@ -246,10 +252,10 @@ def process_csv_file(filepath: str) -> Tuple[pd.DataFrame, Optional[pd.DataFrame
 
 def main():
     """
-    Main function to process all CSV files in patients_results directory.
+    Main function to process all CSV files in patients_raw_data directory.
     """
     # Get all CSV files (focus on 'I' files which contain impedance data)
-    data_dir = 'patients_results'
+    data_dir = 'patients_raw_data'
     csv_files = glob.glob(os.path.join(data_dir, '*I.csv'))
     
     if not csv_files:
