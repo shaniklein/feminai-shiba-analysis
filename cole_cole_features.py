@@ -72,13 +72,14 @@ def cole_cole_residual(params: Tuple, freq: np.ndarray, Z_real: np.ndarray, Z_im
     return residual
 
 
-def fit_cole_cole(freq: np.ndarray, Z_complex: np.ndarray) -> Tuple[float, float, float, float, float, float, float]:
+def fit_cole_cole(freq: np.ndarray, Z_complex: np.ndarray, debug: bool = False) -> Tuple[float, float, float, float, float, float, float]:
     """
     Fit Cole-Cole model to impedance data.
     
     Args:
         freq: Frequency array (Hz)
         Z_complex: Complex impedance array
+        debug: If True, print diagnostic information when fit fails
     
     Returns:
         Tuple of (R0, Rinf, tau, alpha, rmse, relative_rmse, r_squared) or 
@@ -148,11 +149,25 @@ def fit_cole_cole(freq: np.ndarray, Z_complex: np.ndarray) -> Tuple[float, float
         
         # Validate parameters
         if R0 <= Rinf or alpha <= 0 or alpha > 1 or tau <= 0:
+            if debug:
+                print(f"      Fit failed validation: R0={R0:.1f}, Rinf={Rinf:.1f}, "
+                      f"alpha={alpha:.3f}, tau={tau:.2e}")
+                if R0 <= Rinf:
+                    print(f"        → R0 ({R0:.1f}) <= Rinf ({Rinf:.1f})")
+                if alpha <= 0 or alpha > 1:
+                    print(f"        → alpha ({alpha:.3f}) not in (0, 1]")
+                if tau <= 0:
+                    print(f"        → tau ({tau:.2e}) <= 0")
             return None, None, None, None, None, None, None
         
         return R0, Rinf, tau, alpha, rmse, relative_rmse, r_squared
     
     except Exception as e:
+        if debug:
+            print(f"      Fit failed with exception: {type(e).__name__}: {str(e)}")
+            print(f"        Data: {len(freq)} points, freq range: {np.min(freq):.0f}-{np.max(freq):.0f} Hz")
+            print(f"        Z range: {np.min(np.abs(Z_complex)):.1f}-{np.max(np.abs(Z_complex)):.1f} Ω")
+            print(f"        Initial estimates: R0={R0_est:.1f}, Rinf={Rinf_est:.1f}, tau={tau_est:.2e}, alpha={alpha_est:.2f}")
         return None, None, None, None, None, None, None
 
 
@@ -181,17 +196,22 @@ def assess_fit_quality(relative_rmse: float, r_squared: float, n_points: int) ->
         return "poor"
 
 
-def compute_cole_cole_features(df: pd.DataFrame) -> pd.DataFrame:
+def compute_cole_cole_features(df: pd.DataFrame, save_plots_dir: Optional[str] = None, 
+                               patient_id: str = "", debug: bool = False) -> pd.DataFrame:
     """
     Compute Cole-Cole features for each electrode configuration, separately for each side.
     
     Args:
         df: DataFrame with columns: v1, v2, i1, i2, freq, z, phase, side
+        save_plots_dir: Optional directory to save visualization plots
+        patient_id: Patient ID for plot titles
+        debug: If True, print diagnostic information about skipped configurations
     
     Returns:
         DataFrame with Cole-Cole parameters for each electrode configuration and side
     """
     results = []
+    skipped_configs = []  # Track skipped configurations for debugging
     
     # Check if 'side' column exists, if not, create a dummy 'side' column
     if 'side' not in df.columns:
@@ -203,24 +223,31 @@ def compute_cole_cole_features(df: pd.DataFrame) -> pd.DataFrame:
     
     for (side, v1, v2, i1, i2), group in electrode_groups:
         # Filter out disconnected measurements
-        group = group[group['is_disconnected'] == 0].copy()
+        group_connected = group[group['is_disconnected'] == 0].copy()
         
-        if len(group) < 3:  # Need at least 3 points for fitting
+        if len(group_connected) < 3:  # Need at least 3 points for fitting
+            if debug:
+                skipped_configs.append({
+                    'side': side, 'v1': v1, 'v2': v2, 'i1': i1, 'i2': i2,
+                    'reason': f'Insufficient points: {len(group_connected)} (need >= 3)',
+                    'total_points': len(group),
+                    'connected_points': len(group_connected)
+                })
             continue
         
         # Sort by frequency
-        group = group.sort_values('freq')
+        group_connected = group_connected.sort_values('freq')
         
         # Extract data
-        freq = group['freq'].values
-        z_magnitude = group['z'].values
-        phase_deg = group['phase'].values
+        freq = group_connected['freq'].values
+        z_magnitude = group_connected['z'].values
+        phase_deg = group_connected['phase'].values
         
         # Convert to complex impedance
         Z_complex = complex_impedance_from_polar(z_magnitude, phase_deg)
         
         # Fit Cole-Cole model
-        R0, Rinf, tau, alpha, rmse, relative_rmse, r_squared = fit_cole_cole(freq, Z_complex)
+        R0, Rinf, tau, alpha, rmse, relative_rmse, r_squared = fit_cole_cole(freq, Z_complex, debug=debug)
         
         if R0 is not None:
             # Calculate additional derived features
@@ -228,7 +255,7 @@ def compute_cole_cole_features(df: pd.DataFrame) -> pd.DataFrame:
             fc = 1.0 / (2 * np.pi * tau) if tau > 0 else None  # Characteristic frequency
             
             # Assess fit quality
-            n_points = len(group)
+            n_points = len(group_connected)
             fit_quality = assess_fit_quality(relative_rmse, r_squared, n_points)
             
             results.append({
@@ -251,11 +278,29 @@ def compute_cole_cole_features(df: pd.DataFrame) -> pd.DataFrame:
                 'freq_min': np.min(freq),
                 'freq_max': np.max(freq)
             })
+        else:
+            if debug:
+                skipped_configs.append({
+                    'side': side, 'v1': v1, 'v2': v2, 'i1': i1, 'i2': i2,
+                    'reason': 'Cole-Cole fit failed',
+                    'total_points': len(group),
+                    'connected_points': len(group_connected)
+                })
+    
+    # Print diagnostic information if debug mode
+    if debug and skipped_configs:
+        print(f"\n  Skipped {len(skipped_configs)} configurations:")
+        for skip in skipped_configs[:20]:  # Show first 20
+            print(f"    {skip['side']} side, v1={skip['v1']}, v2={skip['v2']}, "
+                  f"i1={skip['i1']}, i2={skip['i2']}: {skip['reason']} "
+                  f"(total: {skip['total_points']}, connected: {skip['connected_points']})")
+        if len(skipped_configs) > 20:
+            print(f"    ... and {len(skipped_configs) - 20} more")
     
     return pd.DataFrame(results)
 
 
-def process_csv_file(filepath: str) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+def process_csv_file(filepath: str, save_plots_dir: Optional[str] = None, debug: bool = False) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
     """
     Process a single CSV file and compute Cole-Cole features separately for each side.
     
@@ -278,8 +323,12 @@ def process_csv_file(filepath: str) -> Tuple[pd.DataFrame, Optional[pd.DataFrame
             print(f"Warning: Missing columns in {filepath}: {missing_cols}")
             return df, None
         
+        # Get patient ID for plot titles
+        patient_id = df['patient_id'].iloc[0] if 'patient_id' in df.columns and len(df) > 0 else ""
+        
         # Compute Cole-Cole features (side is now included in the grouping)
-        features_df = compute_cole_cole_features(df)
+        features_df = compute_cole_cole_features(df, save_plots_dir=save_plots_dir, 
+                                             patient_id=patient_id, debug=debug)
         
         # Add metadata from original file
         if 'patient_id' in df.columns and len(df) > 0 and len(features_df) > 0:
@@ -313,7 +362,7 @@ def main():
         filename = os.path.basename(filepath)
         print(f"\nProcessing {filename}...")
         
-        df, features_df = process_csv_file(filepath)
+        df, features_df = process_csv_file(filepath,debug=True)
         
         if features_df is not None and len(features_df) > 0:
             features_df['source_file'] = filename
@@ -325,6 +374,33 @@ def main():
     # Combine all results
     if all_features:
         combined_features = pd.concat(all_features, ignore_index=True)
+        
+        # Filter for specific electrode configurations for axilla
+        target_configs = [
+            (15, 23, 15, 23),  # v1,v2,i1,i2
+            (22, 23, 22, 23),
+            (10, 15, 10, 15)
+        ]
+        
+        # Create a mask for filtering
+        mask = pd.Series([False] * len(combined_features), index=combined_features.index)
+        for v1,v2,i1,i2 in target_configs:
+            mask |= ((combined_features['i1'] == i1) & 
+                    (combined_features['v1'] == v1) &
+                    (combined_features['i2'] == i2) &
+                    (combined_features['v2'] == v2))
+        
+        combined_features = combined_features[mask].copy()
+        
+        print(f"\nFiltered to {len(combined_features)} configurations matching target electrode pairs:")
+        for v1,v2,i1,i2 in target_configs:
+            count = len(combined_features[
+                (combined_features['i1'] == i1) & 
+                (combined_features['v1'] == v1) &
+                (combined_features['i2'] == i2) &
+                (combined_features['v2'] == v2)
+            ])
+            print(f"  i1={i1}, v1={v1}, i2={i2}, v2={v2}: {count} fits")
         
         # Save results
         output_file = 'cole_cole_features.csv'
