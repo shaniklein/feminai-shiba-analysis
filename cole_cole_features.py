@@ -341,9 +341,13 @@ def process_csv_file(filepath: str, save_plots_dir: Optional[str] = None, debug:
         return None, None
 
 
-def main():
+def main(only_axilla: bool = True):
     """
     Main function to process all CSV files in patients_raw_data directory.
+    
+    Args:
+        only_axilla: If True, filter to only axilla electrode configurations.
+                     If False, use all configurations.
     """
     # Get all CSV files (focus on 'I' files which contain impedance data)
     data_dir = 'patients_raw_data'
@@ -375,32 +379,33 @@ def main():
     if all_features:
         combined_features = pd.concat(all_features, ignore_index=True)
         
-        # Filter for specific electrode configurations for axilla
-        target_configs = [
-            (15, 23, 15, 23),  # v1,v2,i1,i2
-            (22, 23, 22, 23),
-            (10, 15, 10, 15)
-        ]
-        
-        # Create a mask for filtering
-        mask = pd.Series([False] * len(combined_features), index=combined_features.index)
-        for v1,v2,i1,i2 in target_configs:
-            mask |= ((combined_features['i1'] == i1) & 
+        # Filter for specific electrode configurations for axilla (if requested)
+        if only_axilla:
+            target_configs = [
+                (15, 23, 15, 23),  # v1,v2,i1,i2
+            ]
+            
+            # Create a mask for filtering
+            mask = pd.Series([False] * len(combined_features), index=combined_features.index)
+            for v1,v2,i1,i2 in target_configs:
+                mask |= ((combined_features['i1'] == i1) & 
+                        (combined_features['v1'] == v1) &
+                        (combined_features['i2'] == i2) &
+                        (combined_features['v2'] == v2))
+            
+            combined_features = combined_features[mask].copy()
+            
+            print(f"\nFiltered to {len(combined_features)} configurations matching target electrode pairs:")
+            for v1,v2,i1,i2 in target_configs:
+                count = len(combined_features[
+                    (combined_features['i1'] == i1) & 
                     (combined_features['v1'] == v1) &
                     (combined_features['i2'] == i2) &
-                    (combined_features['v2'] == v2))
-        
-        combined_features = combined_features[mask].copy()
-        
-        print(f"\nFiltered to {len(combined_features)} configurations matching target electrode pairs:")
-        for v1,v2,i1,i2 in target_configs:
-            count = len(combined_features[
-                (combined_features['i1'] == i1) & 
-                (combined_features['v1'] == v1) &
-                (combined_features['i2'] == i2) &
-                (combined_features['v2'] == v2)
-            ])
-            print(f"  i1={i1}, v1={v1}, i2={i2}, v2={v2}: {count} fits")
+                    (combined_features['v2'] == v2)
+                ])
+                print(f"  i1={i1}, v1={v1}, i2={i2}, v2={v2}: {count} fits")
+        else:
+            print(f"\nUsing all {len(combined_features)} configurations (only_axilla=False)")
         
         # Save results
         output_file = 'cole_cole_features.csv'
@@ -477,4 +482,4 @@ def main():
 
 
 if __name__ == '__main__':
-    features = main()
+    features = main(only_axilla=False)
