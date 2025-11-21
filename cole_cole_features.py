@@ -72,7 +72,7 @@ def cole_cole_residual(params: Tuple, freq: np.ndarray, Z_real: np.ndarray, Z_im
     return residual
 
 
-def fit_cole_cole(freq: np.ndarray, Z_complex: np.ndarray) -> Tuple[float, float, float, float, float]:
+def fit_cole_cole(freq: np.ndarray, Z_complex: np.ndarray) -> Tuple[float, float, float, float, float, float, float]:
     """
     Fit Cole-Cole model to impedance data.
     
@@ -81,7 +81,8 @@ def fit_cole_cole(freq: np.ndarray, Z_complex: np.ndarray) -> Tuple[float, float
         Z_complex: Complex impedance array
     
     Returns:
-        Tuple of (R0, Rinf, tau, alpha, rmse) or (None, None, None, None, None) if fit fails
+        Tuple of (R0, Rinf, tau, alpha, rmse, relative_rmse, r_squared) or 
+        (None, None, None, None, None, None, None) if fit fails
     """
     # Extract real and imaginary parts
     Z_real = Z_complex.real
@@ -136,14 +137,48 @@ def fit_cole_cole(freq: np.ndarray, Z_complex: np.ndarray) -> Tuple[float, float
         Z_fitted = cole_cole_model(freq, R0, Rinf, tau, alpha)
         rmse = np.sqrt(np.mean(np.abs(Z_complex - Z_fitted)**2))
         
+        # Calculate relative RMSE (as percentage)
+        mean_impedance = np.mean(np.abs(Z_complex))
+        relative_rmse = (rmse / mean_impedance) * 100 if mean_impedance > 0 else float('inf')
+        
+        # Calculate R-squared (coefficient of determination)
+        ss_res = np.sum(np.abs(Z_complex - Z_fitted)**2)
+        ss_tot = np.sum(np.abs(Z_complex - np.mean(Z_complex))**2)
+        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+        
         # Validate parameters
         if R0 <= Rinf or alpha <= 0 or alpha > 1 or tau <= 0:
-            return None, None, None, None, None
+            return None, None, None, None, None, None, None
         
-        return R0, Rinf, tau, alpha, rmse
+        return R0, Rinf, tau, alpha, rmse, relative_rmse, r_squared
     
     except Exception as e:
-        return None, None, None, None, None
+        return None, None, None, None, None, None, None
+
+
+def assess_fit_quality(relative_rmse: float, r_squared: float, n_points: int) -> str:
+    """
+    Assess fit quality based on relative RMSE, R-squared, and number of data points.
+    
+    Args:
+        relative_rmse: Relative RMSE as percentage
+        r_squared: R-squared coefficient of determination
+        n_points: Number of data points used in the fit
+    
+    Returns:
+        Quality score: "good", "fair", or "poor"
+    """
+    # Check number of points
+    if n_points < 5:
+        return "poor"
+    
+    # Check relative error and R-squared
+    if relative_rmse < 5 and r_squared > 0.95 and n_points >= 10:
+        return "good"
+    elif relative_rmse < 10 and r_squared > 0.90 and n_points >= 5:
+        return "fair"
+    else:
+        return "poor"
 
 
 def compute_cole_cole_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -185,12 +220,16 @@ def compute_cole_cole_features(df: pd.DataFrame) -> pd.DataFrame:
         Z_complex = complex_impedance_from_polar(z_magnitude, phase_deg)
         
         # Fit Cole-Cole model
-        R0, Rinf, tau, alpha, rmse = fit_cole_cole(freq, Z_complex)
+        R0, Rinf, tau, alpha, rmse, relative_rmse, r_squared = fit_cole_cole(freq, Z_complex)
         
         if R0 is not None:
             # Calculate additional derived features
             delta_R = R0 - Rinf  # Resistance change
             fc = 1.0 / (2 * np.pi * tau) if tau > 0 else None  # Characteristic frequency
+            
+            # Assess fit quality
+            n_points = len(group)
+            fit_quality = assess_fit_quality(relative_rmse, r_squared, n_points)
             
             results.append({
                 'side': side,
@@ -205,7 +244,10 @@ def compute_cole_cole_features(df: pd.DataFrame) -> pd.DataFrame:
                 'delta_R': delta_R,
                 'fc': fc,
                 'rmse': rmse,
-                'n_points': len(group),
+                'relative_rmse': relative_rmse,
+                'r_squared': r_squared,
+                'fit_quality': fit_quality,
+                'n_points': n_points,
                 'freq_min': np.min(freq),
                 'freq_max': np.max(freq)
             })
@@ -291,6 +333,66 @@ def main():
         print(f"  Total configurations: {len(combined_features)}")
         print(f"\nFeature summary:")
         print(combined_features[['R0', 'Rinf', 'tau', 'alpha', 'delta_R', 'fc']].describe())
+        
+        # Add this after line 493, before the "="*60 line
+
+        # Print detailed poor quality fits by patient
+        poor_fits = combined_features[combined_features['fit_quality'] == 'poor'].copy()
+        
+        if len(poor_fits) > 0:
+            print(f"\n{'='*60}")
+            print("POOR QUALITY FITS BY PATIENT")
+            print(f"{'='*60}")
+            
+            # Group by patient if patient_id column exists
+            if 'patient_id' in poor_fits.columns:
+                for patient_id in sorted(poor_fits['patient_id'].unique()):
+                    patient_poor = poor_fits[poor_fits['patient_id'] == patient_id]
+                    print(f"\n{patient_id} - {len(patient_poor)} poor quality fits:")
+                    print(f"  {'Side':<6} {'v1':<3} {'v2':<3} {'i1':<3} {'i2':<3} "
+                            f"{'Rel.RMSE':<10} {'R²':<8} {'n_points':<10} {'Reason':<15}")
+                    print(f"  {'-'*6} {'-'*3} {'-'*3} {'-'*3} {'-'*3} "
+                            f"{'-'*10} {'-'*8} {'-'*10} {'-'*15}")
+                    
+                    for idx, row in patient_poor.iterrows():
+                        # Determine reason for poor fit
+                        reasons = []
+                        if row['n_points'] < 5:
+                            reasons.append("Few points")
+                        if row['relative_rmse'] > 10:
+                            reasons.append("High error")
+                        if row['r_squared'] < 0.90:
+                            reasons.append("Low R²")
+                        reason_str = ", ".join(reasons) if reasons else "Multiple"
+                        
+                        print(f"  {str(row['side']):<6} {int(row['v1']):<3} {int(row['v2']):<3} "
+                                f"{int(row['i1']):<3} {int(row['i2']):<3} "
+                                f"{row['relative_rmse']:>8.2f}% {row['r_squared']:>7.4f} "
+                                f"{int(row['n_points']):>10} {reason_str:<15}")
+            else:
+                # If no patient_id, just print all poor fits
+                print(f"\n{len(poor_fits)} poor quality fits (no patient_id column):")
+                print(f"  {'Side':<6} {'v1':<3} {'v2':<3} {'i1':<3} {'i2':<3} "
+                        f"{'Rel.RMSE':<10} {'R²':<8} {'n_points':<10} {'Reason':<15}")
+                print(f"  {'-'*6} {'-'*3} {'-'*3} {'-'*3} {'-'*3} "
+                        f"{'-'*10} {'-'*8} {'-'*10} {'-'*15}")
+                
+                for idx, row in poor_fits.iterrows():
+                    reasons = []
+                    if row['n_points'] < 5:
+                        reasons.append("Few points")
+                    if row['relative_rmse'] > 10:
+                        reasons.append("High error")
+                    if row['r_squared'] < 0.90:
+                        reasons.append("Low R²")
+                    reason_str = ", ".join(reasons) if reasons else "Multiple"
+                    
+                    print(f"  {str(row['side']):<6} {int(row['v1']):<3} {int(row['v2']):<3} "
+                            f"{int(row['i1']):<3} {int(row['i2']):<3} "
+                            f"{row['relative_rmse']:>8.2f}% {row['r_squared']:>7.4f} "
+                            f"{int(row['n_points']):>10} {reason_str:<15}")
+    
+        print(f"\n{'='*60}")
         
         return combined_features
     else:
